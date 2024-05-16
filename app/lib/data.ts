@@ -9,23 +9,28 @@ import {
   Revenue,
 } from './definitions';
 import { formatCurrency } from './utils';
+import { unstable_noStore as noStore } from 'next/cache';
+import { createClient } from '@supabase/supabase-js'
+
+const supabaseUrl = process.env.SUPABASE_URL
+const supabaseKey = process.env.SUPABASE_KEY
 
 export async function fetchRevenue() {
   // Add noStore() here to prevent the response from being cached.
   // This is equivalent to in fetch(..., {cache: 'no-store'}).
+  noStore()
+  const client = createClient(supabaseUrl, supabaseKey)
 
   try {
     // Artificially delay a response for demo purposes.
     // Don't do this in production :)
 
-    // console.log('Fetching revenue data...');
-    // await new Promise((resolve) => setTimeout(resolve, 3000));
+    console.log('Fetching revenue data...');
+    await new Promise((resolve) => setTimeout(resolve, 3000));
 
-    const data = await sql<Revenue>`SELECT * FROM revenue`;
+    const { data } = await client.from('revenue').select().returns<Revenue>().throwOnError();
 
-    // console.log('Data fetch completed after 3 seconds.');
-
-    return data.rows;
+    return data;
   } catch (error) {
     console.error('Database Error:', error);
     throw new Error('Failed to fetch revenue data.');
@@ -33,18 +38,26 @@ export async function fetchRevenue() {
 }
 
 export async function fetchLatestInvoices() {
-  try {
-    const data = await sql<LatestInvoiceRaw>`
-      SELECT invoices.amount, customers.name, customers.image_url, customers.email, invoices.id
-      FROM invoices
-      JOIN customers ON invoices.customer_id = customers.id
-      ORDER BY invoices.date DESC
-      LIMIT 5`;
+  noStore()
+  const client = createClient(supabaseUrl, supabaseKey)
 
-    const latestInvoices = data.rows.map((invoice) => ({
+  try {
+    const { data } = await client
+      .from('invoices')
+      .select('amount, date, customer:customers(name, image_url, email)')
+      .order('date', { ascending: false })
+      .limit(5)
+      .returns<LatestInvoiceRaw>()
+      .throwOnError();
+
+    const latestInvoices = data.map((invoice) => ({
       ...invoice,
+      name: invoice.customer.name,
+      image_url: invoice.customer.image_url,
+      email: invoice.customer.email,
       amount: formatCurrency(invoice.amount),
     }));
+
     return latestInvoices;
   } catch (error) {
     console.error('Database Error:', error);
@@ -53,33 +66,45 @@ export async function fetchLatestInvoices() {
 }
 
 export async function fetchCardData() {
+  noStore()
+  const client = createClient(supabaseUrl, supabaseKey)
+
   try {
-    // You can probably combine these into a single SQL query
-    // However, we are intentionally splitting them to demonstrate
-    // how to initialize multiple queries in parallel with JS.
-    const invoiceCountPromise = sql`SELECT COUNT(*) FROM invoices`;
-    const customerCountPromise = sql`SELECT COUNT(*) FROM customers`;
-    const invoiceStatusPromise = sql`SELECT
-         SUM(CASE WHEN status = 'paid' THEN amount ELSE 0 END) AS "paid",
-         SUM(CASE WHEN status = 'pending' THEN amount ELSE 0 END) AS "pending"
-         FROM invoices`;
+
+    const customerCountPromise = await client
+      .from('customers')
+      .select('*', { count: 'exact', head: true })
+      .throwOnError()
+
+    const paidInvoicesPromise = await client
+      .from('invoices')
+      .select('amount.sum(), id.count()')
+      .eq('status', 'paid')
+      .single()
+      .throwOnError()
+
+    const pendingInvoicesPromise = await client
+      .from('invoices')
+      .select('amount.sum(), id.count()')
+      .eq('status', 'pending')
+      .single()
+      .throwOnError()
 
     const data = await Promise.all([
-      invoiceCountPromise,
       customerCountPromise,
-      invoiceStatusPromise,
+      paidInvoicesPromise,
+      pendingInvoicesPromise
     ]);
 
-    const numberOfInvoices = Number(data[0].rows[0].count ?? '0');
-    const numberOfCustomers = Number(data[1].rows[0].count ?? '0');
-    const totalPaidInvoices = formatCurrency(data[2].rows[0].paid ?? '0');
-    const totalPendingInvoices = formatCurrency(data[2].rows[0].pending ?? '0');
+    const { count: numberOfCustomers } = data[0]
+    const { data: { sum: totalPaidInvoices, count: totalPaidInvoicesCount } } = data[1]
+    const { data: { sum: totalPendingInvoices, count: totalPendingInvoicesCount } } = data[2]
 
     return {
       numberOfCustomers,
-      numberOfInvoices,
-      totalPaidInvoices,
-      totalPendingInvoices,
+      numberOfInvoices: totalPaidInvoicesCount + totalPendingInvoicesCount,
+      totalPaidInvoices: formatCurrency(totalPaidInvoices),
+      totalPendingInvoices: formatCurrency(totalPendingInvoices),
     };
   } catch (error) {
     console.error('Database Error:', error);
